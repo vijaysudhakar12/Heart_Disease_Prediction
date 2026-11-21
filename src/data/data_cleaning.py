@@ -1,160 +1,157 @@
+"""Data cleaning for the Heart Disease UCI dataset.
 
+Location in project: src/data/data_cleaning.py
+Run from anywhere:   python src/data/data_cleaning.py
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
 from pathlib import Path
-from typing import Iterable, Optional
 
+import numpy as np
 import pandas as pd
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_INPUT_PATH = PROJECT_ROOT / "data" / "raw" / "heart.csv"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from src.data.data_loader import load_data  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------
+# Paths
+# --------------------------------------------------------------------------
+DEFAULT_INPUT_PATH = PROJECT_ROOT / "data" / "raw" / "heart_disease_uci.csv"
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "cleaned_heart.csv"
 
+# --------------------------------------------------------------------------
+# Cleaning configuration
+# --------------------------------------------------------------------------
+DROP_COLUMNS = ["ca", "thal"]                      # too many missing values
+ZERO_IS_MISSING = ["chol", "trestbps"]             # 0 is not a valid reading
+MODE_COLUMNS = ["exang", "slope", "fbs", "restecg"]  # categorical / binary
+MEDIAN_COLUMNS = ["trestbps", "oldpeak", "chol", "thalch"]  # numeric
+OUTLIER_COLUMNS = ["trestbps", "thalch", "oldpeak"]
+INT_COLUMNS = ["trestbps", "chol", "thalch"]
+BOOL_COLUMNS = ["fbs", "exang"]
 
-def _existing_columns(df: pd.DataFrame, columns: Iterable[str]) -> list[str]:
-    """Return only columns that exist in the DataFrame."""
-    return [column for column in columns if column in df.columns]
+
+def _check_columns(df: pd.DataFrame, columns: list[str]) -> None:
+    missing = [c for c in columns if c not in df.columns]
+    if missing:
+        raise KeyError(f"Expected columns not found in dataset: {missing}")
 
 
-def clean_data(
+def handle_outliers(
     df: pd.DataFrame,
-    drop_columns: Optional[Iterable[str]] = None,
-    zero_as_missing: Optional[dict[str, list[float]]] = None,
-    verbose: bool = True,
+    columns: list[str],
+    method: str = "clip",
+    factor: float = 1.5,
 ) -> pd.DataFrame:
+    """Handle outliers using the IQR rule.
+
+    method="clip": cap values at the IQR fences (keeps every row).
+    method="drop": remove rows outside the fences (fences are computed once
+                   on the original data, so column order doesn't matter).
+    NaN values are ignored when computing quartiles and are left untouched.
     """
-    Clean the Heart Disease dataset.
+    if method not in {"clip", "drop"}:
+        raise ValueError("method must be 'clip' or 'drop'")
 
-    Cleaning sequence:
-      1. Drop ca and thal (as in notebook 03).
-      2. Convert specified invalid zero values to NaN (cholesterol:
-         identified during notebook 04 analysis).
-      3. Fill categorical/binary missing values with mode.
-      4. Fill selected numerical missing values with median or mean.
-      5. Convert selected columns to integer/boolean types.
-      6. Report remaining missing values and duplicate records.
+    df = df.copy()
+    fences = {}
+    for col in columns:
+        q1, q3 = df[col].quantile([0.25, 0.75])
+        iqr = q3 - q1
+        fences[col] = (q1 - factor * iqr, q3 + factor * iqr)
 
-    Note:
-      - The target column 'num' is not imputed.
-      - Duplicate rows are reported, not automatically removed.
-      - IQR outlier removal is not performed here.
-    """
-    cleaned = df.copy()
+    if method == "clip":
+        for col, (low, high) in fences.items():
+            n_out = ((df[col] < low) | (df[col] > high)).sum()
+            logger.info("Clipping %d outliers in '%s'", n_out, col)
+            df[col] = df[col].clip(lower=low, upper=high)
+        return df
 
-    if drop_columns is None:
-        drop_columns = ["ca", "thal"]
+    keep = pd.Series(True, index=df.index)
+    for col, (low, high) in fences.items():
+        keep &= df[col].isna() | df[col].between(low, high)
+    logger.info("Dropping %d outlier rows", (~keep).sum())
+    return df[keep]
 
-    # 1. Drop columns selected in notebook 03.
-    columns_to_drop = _existing_columns(cleaned, drop_columns)
-    if columns_to_drop:
-        cleaned = cleaned.drop(columns=columns_to_drop)
 
-    # 2. Handle known invalid values before imputing missing data.
-    # Notebook 04 identified chol == 0 as unavailable cholesterol data.
-    if zero_as_missing is None:
-        zero_as_missing = {"chol": [0]}
+def clean(df: pd.DataFrame, outlier_method: str = "clip") -> pd.DataFrame:
+    """Return a cleaned copy of the raw heart disease dataframe."""
+    df = df.copy()  # never modify the caller's dataframe
 
-    for column, invalid_values in zero_as_missing.items():
-        if column in cleaned.columns:
-            cleaned[column] = cleaned[column].replace(invalid_values, pd.NA)
+    _check_columns(
+        df,
+        MODE_COLUMNS + MEDIAN_COLUMNS + OUTLIER_COLUMNS + BOOL_COLUMNS,
+    )
 
-    # 3. Mode imputation for categorical/binary columns.
-    mode_columns = ["exang", "slope", "fbs", "restecg"]
+    # 1. Drop columns with too many missing values
+    existing = [c for c in DROP_COLUMNS if c in df.columns]
+    if existing:
+        pct = (df[existing].isna().mean() * 100).round(1).to_dict()
+        logger.info("Dropping columns (missing %%): %s", pct)
+        df = df.drop(columns=existing)
 
-    for column in _existing_columns(cleaned, mode_columns):
-        modes = cleaned[column].mode(dropna=True)
-        if not modes.empty:
-            cleaned[column] = cleaned[column].fillna(modes.iloc[0])
+    # 2. Invalid zeros -> NaN (before imputing, so they don't skew statistics)
+    for col in ZERO_IS_MISSING:
+        n_zero = (df[col] == 0).sum()
+        if n_zero:
+            logger.info("Replacing %d zero values in '%s' with NaN", n_zero, col)
+        df[col] = df[col].replace(0, np.nan)
 
-    # 4. Median imputation for selected numerical columns.
-    median_columns = ["trestbps", "oldpeak"]
+    # 3. Outliers (before imputing so imputed values don't affect the fences)
+    df = handle_outliers(df, OUTLIER_COLUMNS, method=outlier_method)
 
-    for column in _existing_columns(cleaned, median_columns):
-        median_value = cleaned[column].median()
-        if pd.notna(median_value):
-            cleaned[column] = cleaned[column].fillna(median_value)
+    # 4. Impute missing values
+    for col in MODE_COLUMNS:
+        df[col] = df[col].fillna(df[col].mode()[0])
+    for col in MEDIAN_COLUMNS:
+        df[col] = df[col].fillna(df[col].median())
 
-    # 5. Mean imputation for selected numerical columns.
-    mean_columns = ["chol", "thalch"]
+    # 5. Fix dtypes (after imputation, so there are no NaNs left)
+    for col in INT_COLUMNS:
+        df[col] = df[col].round().astype(int)
+    for col in BOOL_COLUMNS:
+        df[col] = df[col].astype(bool)
 
-    for column in _existing_columns(cleaned, mean_columns):
-        mean_value = cleaned[column].mean()
-        if pd.notna(mean_value):
-            cleaned[column] = cleaned[column].fillna(mean_value)
+    remaining = int(df.isna().sum().sum())
+    logger.info("Cleaning done. Shape: %s | remaining NaNs: %d", df.shape, remaining)
+    return df.reset_index(drop=True)
 
-    # 6. Convert columns to integer where appropriate.
-    # Use nullable checks so unexpected remaining NaNs do not cause
-    # an opaque conversion error.
-    integer_columns = ["thalch", "trestbps", "chol"]
 
-    for column in _existing_columns(cleaned, integer_columns):
-        if cleaned[column].isna().any():
-            raise ValueError(
-                f"Column '{column}' still contains missing values; "
-                "cannot safely convert it to integer."
-            )
-        cleaned[column] = cleaned[column].round().astype("int64")
+def save(df: pd.DataFrame, output_path: Path = DEFAULT_OUTPUT_PATH) -> Path:
+    """Save the cleaned dataframe to CSV and return the file path."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output_path, index=False)
 
-    # 7. Convert binary columns to boolean.
-    boolean_columns = ["fbs", "exang"]
+    if not output_path.exists():
+        raise IOError(f"Failed to save dataset to {output_path}")
 
-    for column in _existing_columns(cleaned, boolean_columns):
-        if cleaned[column].isna().any():
-            raise ValueError(
-                f"Column '{column}' still contains missing values; "
-                "cannot safely convert it to boolean."
-            )
-        cleaned[column] = cleaned[column].astype(bool)
-
-    if verbose:
-        print("Data cleaning completed.")
-        print("\nDataset shape:", cleaned.shape)
-
-        print("\nMissing-value summary:")
-        missing_summary = pd.DataFrame({
-            "Missing_Count": cleaned.isna().sum(),
-            "Missing_Percentage": cleaned.isna().mean() * 100,
-        })
-        print(missing_summary)
-
-        print("\nDuplicate rows:", cleaned.duplicated().sum())
-
-        if "id" in cleaned.columns:
-            print("Duplicate IDs:", cleaned["id"].duplicated().sum())
-
-        if "num" in cleaned.columns:
-            print("\nTarget distribution:")
-            print(cleaned["num"].value_counts(dropna=False).sort_index())
-            print("Target missing values:", cleaned["num"].isna().sum())
-
-    return cleaned
+    logger.info("Saved to %s (%d bytes)", output_path, output_path.stat().st_size)
+    return output_path
 
 
 def load_and_clean_data(
-    input_path: Path | str = DEFAULT_INPUT_PATH,
-    output_path: Path | str = DEFAULT_OUTPUT_PATH,
-    verbose: bool = True, ) -> pd.DataFrame:
-    """Load the raw CSV, clean it, save the cleaned CSV, and return it."""
-    input_path = Path(input_path)
-    output_path = Path(output_path)
+    input_path: Path = DEFAULT_INPUT_PATH,
+    output_path: Path = DEFAULT_OUTPUT_PATH,
+    outlier_method: str = "clip",
+) -> pd.DataFrame:
+    """Load raw data, clean it, save it, and return the cleaned dataframe."""
+    df = load_data(input_path)
+    if df is None:
+        raise RuntimeError(f"Could not load data from {input_path}")
 
-    if not input_path.exists():
-        raise FileNotFoundError(
-            f"Input dataset was not found: {input_path}\n"
-            "Check the file name and data/raw directory."
-        )
-
-    df = pd.read_csv(input_path)
-    cleaned_df = clean_data(df, verbose=verbose)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    cleaned_df.to_csv(output_path, index=False)
-
-    if verbose:
-        print("\nCleaned dataset saved successfully:")
-        print(output_path.resolve())
-        print("File size:", output_path.stat().st_size, "bytes")
-
-    return cleaned_df
+    clean_df = clean(df, outlier_method=outlier_method)
+    save(clean_df, output_path)
+    return clean_df
 
 
 if __name__ == "__main__":
