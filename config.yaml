@@ -1,0 +1,24 @@
+# Project configuration (read by src/utils/common.py).
+# Any key you remove falls back to the default shown here.
+
+random_state: 42
+test_size: 0.2
+cv_folds: 5
+
+# Metric used to pick the best model and to tune it.
+# One of: accuracy, precision, recall, f1, roc_auc
+scoring: f1
+
+# StandardScaler on numeric columns (helps linear/KNN models, harmless for trees)
+scale_numeric: true
+
+# Oversample the minority class with SMOTE inside each CV fold.
+# Needs: pip install imbalanced-learn
+use_smote: false
+
+tuning:
+  search: random   # "random" or "grid"
+  n_iter: 20       # only used for random search
+
+# Probability above which the app reports "Heart disease"
+prediction_threshold: 0.5
