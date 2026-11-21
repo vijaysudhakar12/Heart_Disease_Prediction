@@ -1,0 +1,44 @@
+HEART DISEASE PREDICTION - MODEL REPORT
+Generated: 2026-11-21 17:59:02
+
+Best model (chosen by cross-validation): gradient_boosting
+
+Cross-validation comparison (training data)
+------------------------------------------------------------
+            model  accuracy_mean  accuracy_std  precision_mean  precision_std  recall_mean  recall_std  f1_mean  f1_std  roc_auc_mean  roc_auc_std
+gradient_boosting         0.8125        0.0230          0.8182         0.0327       0.8525      0.0138   0.8345  0.0163        0.8749       0.0211
+    random_forest         0.8030        0.0362          0.8226         0.0522       0.8279      0.0451   0.8233  0.0292        0.8801       0.0242
+          xgboost         0.7894        0.0316          0.7998         0.0476       0.8329      0.0173   0.8148  0.0195        0.8513       0.0290
+    decision_tree         0.7473        0.0325          0.8056         0.0654       0.7272      0.0421   0.7613  0.0225        0.8125       0.0360
+
+Final test-set evaluation (used once, after model selection)
+------------------------------------------------------------
+accuracy: 0.8207
+precision: 0.8165
+recall: 0.8725
+f1: 0.8436
+roc_auc: 0.9144
+
+Confusion matrix [[TN, FP], [FN, TP]]:
+[[62, 20], [13, 89]]
+
+Classification report:
+              precision    recall  f1-score   support
+
+  No disease       0.83      0.76      0.79        82
+     Disease       0.82      0.87      0.84       102
+
+    accuracy                           0.82       184
+   macro avg       0.82      0.81      0.82       184
+weighted avg       0.82      0.82      0.82       184
+
+Config used
+------------------------------------------------------------
+random_state: 42
+test_size: 0.2
+cv_folds: 5
+scoring: f1
+scale_numeric: True
+use_smote: False
+tuning: {'search': 'random', 'n_iter': 20}
+prediction_threshold: 0.5
